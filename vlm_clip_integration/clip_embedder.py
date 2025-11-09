@@ -1,4 +1,3 @@
-# vlm_clip_integration/clip_embedder.py
 """
 clip_embedder.py
 

@@ -1,5 +1,19 @@
-# vlm_clip_integration/features_extractor.py
-'''Custom SB3 features extractor that CNN-encodes the image and MLP-encodes the goal vector, then concatenates them.'''
+"""
+features_extractor.py
+
+Implements a custom Stable-Baselines3 features extractor that fuses visual
+and language-goal representations.  The module expects a Dict observation
+containing:
+    "image" -> RGB array processed through a lightweight CNN encoder
+    "goal"  -> CLIP text-embedding vector processed by a small MLP
+
+Both feature branches are projected into latent spaces (cnn_out and goal_out)
+and concatenated before a final fusion layer produces a shared representation
+(features_dim) for the policy and value networks.  This design lets PPO learn
+jointly from visual context and semantic goals, forming the bridge between
+language understanding (via CLIP) and embodied decision making.
+"""
+
 import gymnasium as gym
 import torch as th
 import torch.nn as nn

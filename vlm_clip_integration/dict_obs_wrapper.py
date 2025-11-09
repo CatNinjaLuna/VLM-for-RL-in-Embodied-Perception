@@ -1,9 +1,20 @@
 # vlm_clip_integration/dict_obs_wrapper.py
-'''
-A Gymnasium wrapper that:
-Assumes the underlying env outputs RGB frames (H,W,3) (uint8)
-Adds a fixed goal vector to every observation (the CLIP text embedding)
-'''
+"""
+dict_obs_wrapper.py
+
+Defines a Gymnasium ObservationWrapper that augments a standard image-based
+environment with a fixed CLIP text-embedding vector representing the goal.
+The wrapper converts each observation into a dictionary of the form:
+    {"image": (H,W,3) uint8 frame, "goal": (D,) float32 vector}
+where D is the embedding dimension (e.g., 512).
+
+This structure allows Stable-Baselines3's MultiInputPolicy to process both
+visual and language features within a single PPO pipeline.  The goal vector is
+typically constant for an episode and provides high-level semantic context
+(e.g., "go to the red cube") while the CNN continues to learn pixel-level
+control signals from the image stream.
+"""
+
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces

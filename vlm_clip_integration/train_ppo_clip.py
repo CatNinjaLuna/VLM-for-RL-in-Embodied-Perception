@@ -1,11 +1,21 @@
-# vlm_clip_integration/train_ppo_clip.py
-'''
-builds MiniGrid env in RGB mode 
-computes CLIP text embedding once 
-wraps the env to return Dict observations with image + goal vector
-sets up PPO with the custom extractor
-trains and logs to TensorBoard
-'''
+"""
+train_ppo_clip.py
+
+Main training entry point for integrating CLIP goal embeddings into a PPO
+agent.  The script:
+  1. Loads a pretrained CLIP model and converts a goal text string into a
+     fixed embedding vector.
+  2. Wraps an RGB MiniGrid environment with AddGoalVecDictObs so that each
+     observation contains both image and goal information.
+  3. Configures a Stable-Baselines3 PPO model using MultiInputPolicy and the
+     custom ImagePlusGoalExtractor to fuse the two modalities.
+  4. Trains the agent, logs progress to TensorBoard, and saves model weights.
+
+This script represents the transition from a vision-only baseline to a
+vision-language RL pipeline, enabling semantic goal conditioning and serving
+as the foundation for future LoRA fine-tuning or BLIP-2 extensions.
+"""
+
 import os
 import argparse
 import numpy as np
