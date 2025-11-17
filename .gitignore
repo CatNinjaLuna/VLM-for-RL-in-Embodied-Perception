@@ -1,0 +1,38 @@
+# Python cache and compiled files
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Anaconda & Virtual Environments
+# (Ignoring the environments you've mentioned)
+vla-env/
+vla_lab/
+venv/
+.venv/
+env/
+.env/
+
+# Generated Artifacts (Logs & Models)
+# These are created by train_ppo_clip.py
+logs/
+models/
+
+# Specific model files
+# (Uncomment the line below if you want to ignore all zip files)
+# *.zip
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+
+# Caches
+.cache/
+.pytest_cache/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
