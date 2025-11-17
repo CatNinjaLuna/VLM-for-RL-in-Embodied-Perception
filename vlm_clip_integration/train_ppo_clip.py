@@ -75,10 +75,8 @@ def main():
     #
     # Simpler approach: convert image from (H,W,3) to (C,H,W) in a wrapper. We'll do it here:
 
-    from stable_baselines3.common.vec_env import VecTranspose
     # Build a transpose wrapper for the "image" key inside Dict observations
-    vec_env = VecTranspose(vec_env, op=lambda obs: {"image": np.transpose(obs["image"], (0,3,1,2)),
-                                                    "goal": obs["goal"]})
+    vec_env = VecTransposeImage(vec_env)
 
     # 3) PPO + custom features extractor
     policy_kwargs = dict(
@@ -91,6 +89,7 @@ def main():
         policy="MultiInputPolicy",   # Dict observation
         env=vec_env,
         policy_kwargs=policy_kwargs,
+        device="cuda",
         verbose=1,
         tensorboard_log=args.logdir,
         seed=args.seed,
