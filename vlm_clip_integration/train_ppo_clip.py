@@ -20,13 +20,19 @@ import os
 import argparse
 import numpy as np
 import gymnasium as gym
-from stable_baselines3 import PPO
-from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import VecTransposeImage
-from stable_baselines3.common.utils import set_random_seed
 
-from clip_embedder import load_clip, text_to_vec
-from dict_obs_wrapper import AddGoalVecDictObs
+# 1. Import RecurrentPPO
+from sb3_contrib import RecurrentPPO
+from stable_baselines3.common.env_util import make_vec_env
+# 2. Import DummyVecEnv (Required for RecurrentPPO)
+from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage, SubprocVecEnv
+from stable_baselines3.common.utils import set_random_seed
+from stable_baselines3.common import utils
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
+
+from clip_embedder import load_clip
+# 3. Import the Dynamic Wrapper
+from dict_obs_wrapper import AddDynamicGoalVecDictObs
 from features_extractor import ImagePlusGoalExtractor
 
 def make_rgb_minigrid(env_id: str, tile_size: int = 8, seed: int = 0):
@@ -41,67 +47,126 @@ def make_rgb_minigrid(env_id: str, tile_size: int = 8, seed: int = 0):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", default="MiniGrid-Empty-8x8-v0")
-    parser.add_argument("--steps", type=int, default=300_000)
-    parser.add_argument("--n_envs", type=int, default=4)
+    parser.add_argument("--env", default="MiniGrid-ObstructedMaze-2Dlh-v0")
+    parser.add_argument("--steps", type=int, default=3_000_000)
+    parser.add_argument("--n_envs", type=int, default=16)
     parser.add_argument("--tile_size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--goal_text", type=str, default="go to the red goal")
-    parser.add_argument("--logdir", type=str, default="./logs/clip_vlm")
-    parser.add_argument("--model_out", type=str, default="./models/ppo_clip_vlm")
+    parser.add_argument("--logdir", type=str, default="./logs/recurrent_clip_vlm")
+    parser.add_argument("--model_out", type=str, default="./models/recurrent_ppo_clip_vlm.zip")
+    parser.add_argument("--load_model", type=str, default=None, help="Path to a .zip model file to load and continue training.")
+    
     args = parser.parse_args()
 
     os.makedirs(args.logdir, exist_ok=True)
     os.makedirs(os.path.dirname(args.model_out), exist_ok=True)
 
-    # 1) Load CLIP and turn goal text into a unit vector
+    # 1) Load CLIP
     model, tokenizer, preprocess, device = load_clip("ViT-B-32", "openai")
-    goal_vec = text_to_vec(model, tokenizer, device, args.goal_text)  # (D,)
-    goal_dim = goal_vec.shape[0]
 
-    # 2) Build vectorized envs -> wrap with Dict obs (image + goal)
+    # 2) Build vectorized envs
     set_random_seed(args.seed)
     def env_fn():
         e = make_rgb_minigrid(args.env, args.tile_size, seed=args.seed)()
-        e = AddGoalVecDictObs(e, goal_vec=goal_vec)
+        e = AddDynamicGoalVecDictObs(
+            e,
+            clip_model=model,
+            clip_tokenizer=tokenizer,
+            clip_device=device
+        )
         return e
 
-    vec_env = make_vec_env(env_fn, n_envs=args.n_envs)
-    # Important: transpose only the image channel for SB3 CNN
-    # SB3's VecTransposeImage expects observation to be image array, but we have Dict.
-    # We'll instead use Dict obs directly: SB3 supports Dict for policies since v2 with custom extractors.
-    # We must NOT wrap the whole Dict with VecTransposeImage; instead, tell SB3 to auto-transpose in policy.
-    # Solution: add a custom policy class or specify `normalize_images=True` and handle transpose in extractor.
-    #
-    # Simpler approach: convert image from (H,W,3) to (C,H,W) in a wrapper. We'll do it here:
-
-    # Build a transpose wrapper for the "image" key inside Dict observations
+    # RecurrentPPO requires DummyVecEnv to maintain LSTM order
+    vec_env = make_vec_env(env_fn, n_envs=args.n_envs, vec_env_cls=SubprocVecEnv)
     vec_env = VecTransposeImage(vec_env)
 
-    # 3) PPO + custom features extractor
-    policy_kwargs = dict(
-        features_extractor_class=ImagePlusGoalExtractor,
-        # optional: tweak net sizes via features_extractor_kwargs
-        # features_extractor_kwargs=dict(cnn_out=256, goal_out=64, fused=256),
+    print("Creating separate evaluation environment...")
+    eval_env_fn = make_rgb_minigrid(args.env, args.tile_size, seed=args.seed + 1)
+    # Use AddDynamicGoalVecDictObs for the eval env too
+    eval_env = DummyVecEnv([lambda: AddDynamicGoalVecDictObs(eval_env_fn(), model, tokenizer, device)])
+    eval_env = VecTransposeImage(eval_env)
+
+    total_timesteps_for_learn = args.steps
+
+    # 3) Initialize or Load Model
+    if args.load_model:
+        print(f"--- RESUMING TRAINING FROM: {args.load_model} ---")
+        model = RecurrentPPO.load(
+            args.load_model,
+            env=vec_env,
+            device="cuda"
+        )
+        # Configure logger to continue appending to the same logs
+        new_logger = utils.configure_logger(model.verbose, args.logdir, "RecurrentPPO", reset_num_timesteps=False)
+        model.set_logger(new_logger)
+
+        model.learning_rate = 1e-4 
+        model.ent_coef = 0.02
+        print(f"Applied new hyperparameters: lr={model.learning_rate}, ent_coef={model.ent_coef}")
+        total_timesteps_for_learn = model.num_timesteps + args.steps
+        print(f"Current steps: {model.num_timesteps}. Adding {args.steps} new steps.")
+
+        # This is the most important part: update the optimizer itself
+        for param_group in model.policy.optimizer.param_groups:
+            param_group['lr'] = model.learning_rate
+
+    else:
+        print("--- STARTING NEW TRAINING ---")
+        policy_kwargs = dict(
+            features_extractor_class=ImagePlusGoalExtractor,
+        )
+        model = RecurrentPPO(
+            policy="MultiInputLstmPolicy",
+            env=vec_env,
+            policy_kwargs=policy_kwargs,
+            device="cuda",
+            verbose=1,
+            tensorboard_log=args.logdir,
+            seed=args.seed,
+            n_steps=2048,
+            batch_size=64,
+            
+            # Tweak these if you want to force more exploration (Option 1):
+            learning_rate=1e-4, 
+            ent_coef=0.02
+        )
+
+    print(f"Target Total Timesteps: {args.steps}")
+
+    # Callbacks
+    checkpoint_freq = max(50000 // args.n_envs, 1)
+    eval_freq = max(25000 // args.n_envs, 1)
+    print(f"Checkpointing enabled: Saving backups every {checkpoint_freq * args.n_envs} total steps.")
+    print(f"Evaluation enabled: Running every {eval_freq * args.n_envs} total steps.")
+    checkpoint_callback = CheckpointCallback(
+      save_freq=checkpoint_freq,
+      save_path=os.path.join(args.logdir, "checkpoints"),
+      name_prefix="rl_model",
+      save_vecnormalize=True,
     )
 
-    model = PPO(
-        policy="MultiInputPolicy",   # Dict observation
-        env=vec_env,
-        policy_kwargs=policy_kwargs,
-        device="cuda",
-        verbose=1,
-        tensorboard_log=args.logdir,
-        seed=args.seed,
-        n_steps=2048,
-        batch_size=64,
-        learning_rate=3e-4,
-        ent_coef=0.01
+    eval_callback = EvalCallback(
+      eval_env,
+      best_model_save_path=os.path.join(args.logdir, "best_model"),
+      log_path=args.logdir,
+      eval_freq=eval_freq,
+      deterministic=True,
+      render=False
     )
 
-    model.learn(total_timesteps=args.steps)
+    callback = CallbackList([checkpoint_callback, eval_callback])
+
+    # 4) Train
+    # reset_num_timesteps=False ensures we add to the previous count
+    model.learn(
+        total_timesteps=total_timesteps_for_learn,
+        reset_num_timesteps=False,
+        callback=callback,
+        progress_bar=True
+    )
+    
+    print(f"[Info] Saving model to {args.model_out}")
     model.save(args.model_out)
-    print(f"[Info] Saved to {args.model_out}")
 
 if __name__ == "__main__":
     main()
