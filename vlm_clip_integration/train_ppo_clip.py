@@ -29,11 +29,13 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage, Sub
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common import utils
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
+from stable_baselines3.common.monitor import Monitor
 
 from clip_embedder import load_clip
 # 3. Import the Dynamic Wrapper
 from dict_obs_wrapper import AddDynamicGoalVecDictObs
 from features_extractor import ImagePlusGoalExtractor
+from reward_shaping_wrapper import RewardShapingWrapper
 
 def make_rgb_minigrid(env_id: str, tile_size: int = 8, seed: int = 0):
     from minigrid.wrappers import RGBImgPartialObsWrapper, ImgObsWrapper
@@ -55,6 +57,13 @@ def main():
     parser.add_argument("--logdir", type=str, default="./logs/recurrent_clip_vlm")
     parser.add_argument("--model_out", type=str, default="./models/recurrent_ppo_clip_vlm.zip")
     parser.add_argument("--load_model", type=str, default=None, help="Path to a .zip model file to load and continue training.")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--ent_coef", type=float, default=0.02, help="Entropy coefficient")
+    parser.add_argument("--use_reward_shaping", action="store_true", help="Enable reward shaping wrapper")
+    parser.add_argument("--rew_key", type=float, default=0.0, help="Bonus for first key pickup")
+    parser.add_argument("--rew_door", type=float, default=0.0, help="Bonus for first door unlock")
+    parser.add_argument("--rew_box", type=float, default=0.0, help="Bonus for first box open")
+    parser.add_argument("--rew_ball", type=float, default=0.0, help="Bonus for first ball pickup")
     
     args = parser.parse_args()
 
@@ -68,12 +77,17 @@ def main():
     set_random_seed(args.seed)
     def env_fn():
         e = make_rgb_minigrid(args.env, args.tile_size, seed=args.seed)()
-        e = AddDynamicGoalVecDictObs(
-            e,
-            clip_model=model,
-            clip_tokenizer=tokenizer,
-            clip_device=device
-        )
+        
+        if args.use_reward_shaping:
+            e = RewardShapingWrapper(
+                e, 
+                rew_key=args.rew_key,
+                rew_door=args.rew_door,
+                rew_box=args.rew_box,
+                rew_ball=args.rew_ball
+            )
+        
+        e = AddDynamicGoalVecDictObs(e, model, tokenizer, device)
         return e
 
     # RecurrentPPO requires DummyVecEnv to maintain LSTM order
@@ -81,9 +95,14 @@ def main():
     vec_env = VecTransposeImage(vec_env)
 
     print("Creating separate evaluation environment...")
-    eval_env_fn = make_rgb_minigrid(args.env, args.tile_size, seed=args.seed + 1)
+    def eval_env_fn():
+        e = make_rgb_minigrid(args.env, args.tile_size, seed=args.seed + 1)()
+        e = AddDynamicGoalVecDictObs(e, model, tokenizer, device)
+        e = Monitor(e)
+        return e
+
     # Use AddDynamicGoalVecDictObs for the eval env too
-    eval_env = DummyVecEnv([lambda: AddDynamicGoalVecDictObs(eval_env_fn(), model, tokenizer, device)])
+    eval_env = DummyVecEnv([eval_env_fn])
     eval_env = VecTransposeImage(eval_env)
 
     total_timesteps_for_learn = args.steps
@@ -100,15 +119,16 @@ def main():
         new_logger = utils.configure_logger(model.verbose, args.logdir, "RecurrentPPO", reset_num_timesteps=False)
         model.set_logger(new_logger)
 
-        model.learning_rate = 1e-4 
-        model.ent_coef = 0.02
+        model.learning_rate = args.lr
+        model.lr_schedule = lambda _: args.lr
+        for param_group in model.policy.optimizer.param_groups:
+            param_group['lr'] = args.lr
+        
+        model.ent_coef = args.ent_coef
         print(f"Applied new hyperparameters: lr={model.learning_rate}, ent_coef={model.ent_coef}")
+        
         total_timesteps_for_learn = model.num_timesteps + args.steps
         print(f"Current steps: {model.num_timesteps}. Adding {args.steps} new steps.")
-
-        # This is the most important part: update the optimizer itself
-        for param_group in model.policy.optimizer.param_groups:
-            param_group['lr'] = model.learning_rate
 
     else:
         print("--- STARTING NEW TRAINING ---")
@@ -125,19 +145,21 @@ def main():
             seed=args.seed,
             n_steps=2048,
             batch_size=64,
-            
-            # Tweak these if you want to force more exploration (Option 1):
-            learning_rate=1e-4, 
-            ent_coef=0.02
+            learning_rate=args.lr, 
+            ent_coef=args.ent_coef
         )
-
-    print(f"Target Total Timesteps: {args.steps}")
 
     # Callbacks
     checkpoint_freq = max(50000 // args.n_envs, 1)
     eval_freq = max(25000 // args.n_envs, 1)
     print(f"Checkpointing enabled: Saving backups every {checkpoint_freq * args.n_envs} total steps.")
     print(f"Evaluation enabled: Running every {eval_freq * args.n_envs} total steps.")
+    
+    if args.use_reward_shaping:
+        print("REWARD SHAPING: ENABLED")
+    else:
+        print("REWARD SHAPING: DISABLED")
+
     checkpoint_callback = CheckpointCallback(
       save_freq=checkpoint_freq,
       save_path=os.path.join(args.logdir, "checkpoints"),
@@ -157,7 +179,6 @@ def main():
     callback = CallbackList([checkpoint_callback, eval_callback])
 
     # 4) Train
-    # reset_num_timesteps=False ensures we add to the previous count
     model.learn(
         total_timesteps=total_timesteps_for_learn,
         reset_num_timesteps=False,
@@ -165,7 +186,7 @@ def main():
         progress_bar=True
     )
     
-    print(f"[Info] Saving model to {args.model_out}")
+    print(f"[Info] Saving FINAL model to {args.model_out}")
     model.save(args.model_out)
 
 if __name__ == "__main__":
