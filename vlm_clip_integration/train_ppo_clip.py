@@ -1,3 +1,8 @@
+# Author: Peiyao Tao, Carolina Li
+# Date: 12/11/2025
+# Class: CS 7180 Advanced Perception
+# Description: Main training entry point for PPO with CLIP goal embeddings.
+
 """
 train_ppo_clip.py
 
@@ -20,34 +25,31 @@ import os
 import argparse
 import numpy as np
 import gymnasium as gym
-
-# 1. Import RecurrentPPO
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.env_util import make_vec_env
-# 2. Import DummyVecEnv (Required for RecurrentPPO)
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common import utils
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
-
 from clip_embedder import load_clip
-# 3. Import the Dynamic Wrapper
 from dict_obs_wrapper import AddDynamicGoalVecDictObs
 from features_extractor import ImagePlusGoalExtractor
 from reward_shaping_wrapper import RewardShapingWrapper
 
 def make_rgb_minigrid(env_id: str, tile_size: int = 8, seed: int = 0):
+    """ Factory to create RGB MiniGrid environments. """
     from minigrid.wrappers import RGBImgPartialObsWrapper, ImgObsWrapper
     def _init():
         e = gym.make(env_id, render_mode="rgb_array", tile_size=tile_size)
         e = RGBImgPartialObsWrapper(e)
-        e = ImgObsWrapper(e)  # returns (H,W,3) uint8
+        e = ImgObsWrapper(e)
         e.reset(seed=seed)
         return e
     return _init
 
 def main():
+    # Parse command line arguments for flexible training
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", default="MiniGrid-ObstructedMaze-2Dlh-v0")
     parser.add_argument("--steps", type=int, default=3_000_000)
@@ -70,10 +72,10 @@ def main():
     os.makedirs(args.logdir, exist_ok=True)
     os.makedirs(os.path.dirname(args.model_out), exist_ok=True)
 
-    # 1) Load CLIP
+    # Load CLIP
     model, tokenizer, preprocess, device = load_clip("ViT-B-32", "openai")
 
-    # 2) Build vectorized envs
+    # Build vectorized envs
     set_random_seed(args.seed)
     def env_fn():
         e = make_rgb_minigrid(args.env, args.tile_size, seed=args.seed)()
@@ -107,7 +109,7 @@ def main():
 
     total_timesteps_for_learn = args.steps
 
-    # 3) Initialize or Load Model
+    # Initialize or Load Model
     if args.load_model:
         print(f"--- RESUMING TRAINING FROM: {args.load_model} ---")
         model = RecurrentPPO.load(
@@ -149,7 +151,6 @@ def main():
             ent_coef=args.ent_coef
         )
 
-    # Callbacks
     checkpoint_freq = max(50000 // args.n_envs, 1)
     eval_freq = max(25000 // args.n_envs, 1)
     print(f"Checkpointing enabled: Saving backups every {checkpoint_freq * args.n_envs} total steps.")
@@ -178,7 +179,7 @@ def main():
 
     callback = CallbackList([checkpoint_callback, eval_callback])
 
-    # 4) Train
+    # Train the agent
     model.learn(
         total_timesteps=total_timesteps_for_learn,
         reset_num_timesteps=False,
